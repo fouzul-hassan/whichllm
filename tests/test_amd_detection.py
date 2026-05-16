@@ -72,6 +72,27 @@ def test_detect_strix_halo_rocm_smi_does_not_treat_aperture_as_vram(monkeypatch)
     assert gpus[0].memory_bandwidth_gbps == 256.0
 
 
+def test_detect_amd_gpu_ignores_intel_only_lspci(monkeypatch):
+    """Regression: an Intel VGA row must not be reported as AMD just
+    because 'Intel Corporation' contains the substring 'ati'."""
+    output = (
+        '00:02.0 "VGA compatible controller" "Intel Corporation" '
+        '"Alder Lake-P GT1 [UHD Graphics]" -r0c -p00 '
+        '"IP3 Tech (HK) Limited" "Device 8027"\n'
+    )
+
+    def fake_run(args, **kwargs):
+        if args[0] == "rocm-smi":
+            raise FileNotFoundError
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(amd.subprocess, "run", fake_run)
+    # Isolate the lspci path: don't let a real sysfs probe leak in.
+    monkeypatch.setattr(amd, "_detect_from_sysfs", lambda: [])
+
+    assert amd.detect_amd_gpus() == []
+
+
 def test_detect_amd_gpu_from_sysfs_when_lspci_missing(monkeypatch, tmp_path):
     card = tmp_path / "card0" / "device"
     card.mkdir(parents=True)

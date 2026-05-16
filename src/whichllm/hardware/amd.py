@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -55,15 +56,18 @@ def _make_gpu(
     )
 
 
-def _normalize_lspci_name(line: str) -> str:
-    parts = [p.strip() for p in line.split('"') if p.strip() and p.strip() != "\t"]
-    for i, part in enumerate(parts):
-        if part.lower() in ("advanced micro devices, inc. [amd/ati]", "amd ati"):
-            if i + 1 < len(parts):
-                return parts[i + 1]
-        if "amd" in part.lower() and "ati" in part.lower() and i + 1 < len(parts):
-            return parts[i + 1]
-    return "AMD Graphics"
+_AMD_VENDOR_MARKERS = (
+    "advanced micro devices",
+    "amd/ati",
+    "[amd]",
+    "[ati]",
+    "ati technologies",
+)
+
+
+def _vendor_is_amd(vendor: str) -> bool:
+    vendor_lower = vendor.lower()
+    return any(marker in vendor_lower for marker in _AMD_VENDOR_MARKERS)
 
 
 def _detect_from_lspci() -> list[str]:
@@ -84,12 +88,23 @@ def _detect_from_lspci() -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     for line in result.stdout.splitlines():
-        line_lower = line.lower()
-        if not any(vendor in line_lower for vendor in ("amd", "ati")):
+        # `lspci -mm` is the machine-parsable format:
+        #   <slot> "<class>" "<vendor>" "<device>" [flags] ["<subvendor>" "<subdevice>"]
+        # Parse the quoted columns properly and check the vendor field
+        # specifically, instead of substring-matching the whole line (which
+        # would treat e.g. "Intel Corpor[ati]on" as AMD).
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
             continue
-        if not any(display_class in line_lower for display_class in _DISPLAY_CLASSES):
+        if len(tokens) < 4:
             continue
-        name = _normalize_lspci_name(line)
+        device_class, vendor, device = tokens[1], tokens[2], tokens[3]
+        if device_class.lower() not in _DISPLAY_CLASSES:
+            continue
+        if not _vendor_is_amd(vendor):
+            continue
+        name = device.strip() or "AMD Graphics"
         if name not in seen:
             names.append(name)
             seen.add(name)
