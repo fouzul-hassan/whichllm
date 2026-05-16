@@ -7,6 +7,7 @@ from whichllm.cli import (
     _auto_min_params_for_profile,
     _current_version,
     _fill_missing_published_at,
+    _generate_chat_script,
     _include_vision_candidates,
     _merge_model_eval_benchmarks,
     _pick_gguf_variant,
@@ -291,6 +292,16 @@ def test_run_exits_gracefully():
             msg in result.stdout
             for msg in ("uv is required", "No model found", "llama-cpp-python")
         )
+
+
+def test_transformers_chat_script_passes_tokenizer_mapping_to_generate():
+    model = _make_model(model_id="org/Test-7B")
+
+    script = _generate_chat_script(model, variant=None, context_length=4096, cpu_only=False)
+
+    assert "return_dict=True" in script
+    assert "kwargs=dict(**inputs, max_new_tokens=512, streamer=streamer)" in script
+    assert "kwargs=dict(input_ids=inputs" not in script
 
 
 def test_snippet_no_model_found():

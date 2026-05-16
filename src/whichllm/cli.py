@@ -732,12 +732,15 @@ while True:
         continue
     messages.append({{"role": "user", "content": user_input}})
     inputs = tokenizer.apply_chat_template(
-        messages, return_tensors="pt", add_generation_prompt=True,
+        messages,
+        return_tensors="pt",
+        return_dict=True,
+        add_generation_prompt=True,
     ).to(model.device)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     thread = Thread(
         target=model.generate,
-        kwargs=dict(input_ids=inputs, max_new_tokens=512, streamer=streamer),
+        kwargs=dict(**inputs, max_new_tokens=512, streamer=streamer),
     )
     thread.start()
     full = ""
