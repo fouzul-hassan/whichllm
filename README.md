@@ -92,6 +92,7 @@ whichllm is built to get right.
 - **Task profiles** — Filter by general, coding, vision, or math use cases
 - **GPU simulation** — Test with any GPU: `whichllm --gpu "RTX 4090"`
 - **Hardware planning** — Reverse lookup: `whichllm plan "llama 3 70b"`
+- **Upgrade planning** — Compare your current machine with candidate GPUs
 - **JSON output** — Pipe-friendly: `whichllm --json`
 
 ## Run & Snippet
@@ -213,6 +214,10 @@ whichllm plan "llama 3 70b"
 whichllm plan "Qwen2.5-72B" --quant Q8_0
 whichllm plan "mistral 7b" --context-length 32768
 
+# Upgrade: compare your current machine against candidate GPUs
+whichllm upgrade "RTX 4090" "RTX 5090" "H100"
+whichllm upgrade "Apple M4 Max" --top 5
+
 # Run: download and chat with a model instantly
 whichllm run "qwen 2.5 1.5b gguf"
 whichllm run                       # auto-pick best for your hardware
@@ -226,15 +231,19 @@ whichllm snippet "llama 3 8b gguf" --quant Q5_K_M
 
 ### Ollama
 
-Find the best model and run it directly:
+Use JSON output to feed scripts that map HuggingFace IDs to your local Ollama
+model names:
 
 ```bash
-# Pick the top model and run it with Ollama
-whichllm --top 1 --json | jq -r '.models[0].model_id' | xargs ollama run
+# Pick the top HuggingFace model ID
+whichllm --top 1 --json | jq -r '.models[0].model_id'
 
-# Find the best coding model
-whichllm --profile coding --top 1 --json | jq -r '.models[0].model_id' | xargs ollama run
+# Find the best coding model ID
+whichllm --profile coding --top 1 --json | jq -r '.models[0].model_id'
 ```
+
+Ollama model names do not always match HuggingFace repo IDs, so a small mapping
+step is usually needed before `ollama run`.
 
 ### Shell alias
 
@@ -264,7 +273,17 @@ trust, and popularity as adjustments.
 
 Score markers:
 - **`~`** (yellow) — No direct benchmark; score inherited/interpolated from the model family
+- **`!sr`** (bright yellow) — Uploader-reported benchmark only, not independently verified
 - **`?`** (yellow) — No benchmark data available
+
+## Documentation
+
+- [CLI reference](docs/cli.md)
+- [How it works](docs/how-it-works.md)
+- [Scoring](docs/scoring.md)
+- [Hardware detection and simulation](docs/hardware.md)
+- [Run and snippet](docs/run-snippet.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
 ## How it works
 
