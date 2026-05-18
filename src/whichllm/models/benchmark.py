@@ -1,8 +1,8 @@
-"""Benchmark data fetcher: Chatbot Arena ELO + Open LLM Leaderboard."""
+"""Benchmark data fetching."""
 
 from __future__ import annotations
 
-import io
+import asyncio
 import json
 import logging
 import math
@@ -14,77 +14,13 @@ from pathlib import Path
 
 import httpx
 
+from whichllm.utils import _current_version
+
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".cache" / "whichllm"
 BENCHMARK_CACHE = CACHE_DIR / "benchmark.json"
 DEFAULT_TTL_SECONDS = 24 * 3600  # 24 hours
-
-# --- Data source URLs ---
-ARENA_ROWS_URL = "https://datasets-server.huggingface.co/rows"
-ARENA_DATASET = "mathewhe/chatbot-arena-elo"
-
-LEADERBOARD_PARQUET_URL = (
-    "https://huggingface.co/api/datasets/open-llm-leaderboard/contents"
-    "/parquet/default/train/0.parquet"
-)
-LEADERBOARD_ROWS_URL = "https://datasets-server.huggingface.co/rows"
-LEADERBOARD_DATASET = "open-llm-leaderboard/contents"
-
-# --- Arena ELO normalization ---
-# Open-source ELO range: ~1030 (worst) to ~1424 (best). Arena is frozen
-# 2025-07-17 (no new models added) so the leaderboard cannot reflect any
-# 2025-Q3+ release; we cap the normalized output at 82 so newer benchmark
-# sources (AA Index / LiveBench, which can reach 95+) decisively win on
-# conflict.
-_ARENA_ELO_MIN = 1030
-_ARENA_ELO_MAX = 1430
-_ARENA_MAX_NORMALIZED = 82.0
-
-# --- Leaderboard normalization ---
-# OLLB v2 averages range ~5 to ~52. The leaderboard is archived 2025-06 with
-# the top slot held by Qwen2.5-32B (47.6 raw = 91.5 if uncapped); capping at
-# 78 prevents an older generation with a strong-but-frozen OLLB score from
-# dominating rankings that now have AA Index / LiveBench coverage too.
-_LB_AVG_MAX = 52
-_OLLB_MAX_NORMALIZED = 78.0
-
-# --- Arena display name -> HuggingFace org mapping ---
-_ARENA_ORG_TO_HF: dict[str, list[str]] = {
-    "Alibaba": ["Qwen"],
-    "Meta": ["meta-llama"],
-    "DeepSeek": ["deepseek-ai"],
-    "DeepSeek AI": ["deepseek-ai"],
-    "Google": ["google"],
-    "Mistral": ["mistralai"],
-    "Microsoft": ["microsoft"],
-    "Nvidia": ["nvidia"],
-    "01 AI": ["01-ai"],
-    "Allen AI": ["allenai"],
-    "Ai2": ["allenai"],
-    "AllenAI/UW": ["allenai"],
-    "Cohere": ["CohereForAI"],
-    "HuggingFace": ["HuggingFaceH4", "huggingface"],
-    "AI21 Labs": ["ai21labs"],
-    "NousResearch": ["NousResearch"],
-    "NexusFlow": ["Nexusflow"],
-    "Princeton": ["princeton-nlp"],
-    "IBM": ["ibm-granite"],
-    "InternLM": ["internlm"],
-    "Together AI": ["togethercomputer"],
-    "TII": ["tiiuae"],
-    "MiniMax": ["MiniMaxAI"],
-    "MosaicML": ["mosaicml"],
-    "Databricks": ["databricks"],
-    "Moonshot": ["moonshotai"],
-    "UC Berkeley": ["berkeley-nest"],
-    "Cognitive Computations": ["cognitivecomputations"],
-    "Upstage AI": ["upstage"],
-    "UW": ["timdettmers"],
-    "Snowflake": ["Snowflake"],
-    "LMSYS": ["lmsys"],
-    "OpenChat": ["openchat"],
-}
 
 
 @dataclass(frozen=True)
@@ -127,150 +63,6 @@ def save_benchmark_cache(scores: dict[str, float]) -> None:
     data = {"cached_at": time.time(), "scores": scores}
     BENCHMARK_CACHE.write_text(json.dumps(data, ensure_ascii=False))
     logger.debug(f"Saved {len(scores)} benchmark scores to cache")
-
-
-def _normalize_arena_elo(elo: float) -> float:
-    """Normalize Arena ELO to a frozen-source-aware 0-_ARENA_MAX_NORMALIZED scale."""
-    score = (
-        (elo - _ARENA_ELO_MIN)
-        / (_ARENA_ELO_MAX - _ARENA_ELO_MIN)
-        * _ARENA_MAX_NORMALIZED
-    )
-    return max(0.0, min(_ARENA_MAX_NORMALIZED, round(score, 1)))
-
-
-def _normalize_leaderboard_avg(avg: float) -> float:
-    """Normalize Open LLM Leaderboard average to 0-_OLLB_MAX_NORMALIZED scale."""
-    score = avg / _LB_AVG_MAX * _OLLB_MAX_NORMALIZED
-    return max(0.0, min(_OLLB_MAX_NORMALIZED, round(score, 1)))
-
-
-def _arena_name_to_hf_ids(model_name: str, org: str) -> list[str]:
-    """Convert Arena display name to potential HuggingFace model IDs."""
-    hf_orgs = _ARENA_ORG_TO_HF.get(org, [])
-    candidates = []
-
-    # Clean the model name: remove date suffixes like "(03-2025)"
-    clean_name = re.sub(r"\s*\([\d-]+\)\s*$", "", model_name).strip()
-    # Remove -bf16, -fp8 suffixes for base matching
-    base_name = re.sub(r"-(bf16|fp8|fp16)$", "", clean_name, flags=re.IGNORECASE)
-
-    for hf_org in hf_orgs:
-        candidates.append(f"{hf_org}/{clean_name}")
-        if base_name != clean_name:
-            candidates.append(f"{hf_org}/{base_name}")
-        # Try with -Instruct suffix stripped for base model matching
-        no_instruct = re.sub(r"-Instruct$", "", clean_name)
-        if no_instruct != clean_name:
-            candidates.append(f"{hf_org}/{no_instruct}")
-
-    return candidates
-
-
-def _fetch_arena_scores(client: httpx.Client) -> dict[str, float]:
-    """Fetch Chatbot Arena ELO scores via rows API."""
-    scores: dict[str, float] = {}
-    offset = 0
-
-    while True:
-        resp = client.get(
-            ARENA_ROWS_URL,
-            params={
-                "dataset": ARENA_DATASET,
-                "config": "default",
-                "split": "train",
-                "offset": str(offset),
-                "length": "100",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("rows", [])
-        if not rows:
-            break
-
-        for r in rows:
-            row = r.get("row", {})
-            model_name = str(row.get("Model", ""))
-            elo = row.get("Arena Score", 0)
-            org = str(row.get("Organization", ""))
-            lic = str(row.get("License", ""))
-
-            if not model_name or not elo or elo <= 0:
-                continue
-            # Skip proprietary models (can't run locally)
-            if "Proprietary" in lic or "Propretary" in lic:
-                continue
-
-            normalized = _normalize_arena_elo(elo)
-            # Map to all potential HF IDs
-            hf_ids = _arena_name_to_hf_ids(model_name, org)
-            for hf_id in hf_ids:
-                scores[hf_id] = normalized
-
-        offset += len(rows)
-        total = data.get("num_rows_total", 0)
-        if total and offset >= total:
-            break
-
-    return scores
-
-
-def _fetch_leaderboard_parquet(client: httpx.Client) -> dict[str, float]:
-    """Download Open LLM Leaderboard parquet (requires pyarrow)."""
-    import pyarrow.parquet as pq
-
-    resp = client.get(LEADERBOARD_PARQUET_URL, follow_redirects=True)
-    resp.raise_for_status()
-    table = pq.read_table(
-        io.BytesIO(resp.content),
-        columns=["fullname", "Average ⬆️"],
-    )
-    d = table.to_pydict()
-    scores: dict[str, float] = {}
-    for i in range(len(d["fullname"])):
-        name = d["fullname"][i]
-        avg = d["Average ⬆️"][i]
-        if name and avg and avg > 0:
-            scores[name] = _normalize_leaderboard_avg(avg)
-    return scores
-
-
-def _fetch_leaderboard_api(client: httpx.Client) -> dict[str, float]:
-    """Fetch Open LLM Leaderboard via rows API (no pyarrow needed)."""
-    scores: dict[str, float] = {}
-    offset = 0
-
-    while True:
-        resp = client.get(
-            LEADERBOARD_ROWS_URL,
-            params={
-                "dataset": LEADERBOARD_DATASET,
-                "config": "default",
-                "split": "train",
-                "offset": str(offset),
-                "length": "100",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("rows", [])
-        if not rows:
-            break
-
-        for r in rows:
-            row = r.get("row", {})
-            name = row.get("fullname")
-            avg = row.get("Average ⬆️")
-            if name and avg and avg > 0:
-                scores[name] = _normalize_leaderboard_avg(avg)
-
-        offset += len(rows)
-        total = data.get("num_rows_total", 0)
-        if total and offset >= total:
-            break
-
-    return scores
 
 
 _LINEAGE_DEMOTION_REGEX = None
@@ -337,7 +129,7 @@ def _apply_lineage_recency_demotion(
     return out
 
 
-def fetch_benchmark_scores() -> dict[str, float]:
+async def fetch_benchmark_scores() -> dict[str, float]:
     """Fetch and combine benchmark scores from multiple sources.
 
     Sources, merged in this order (later overwrites earlier on conflict):
@@ -348,15 +140,46 @@ def fetch_benchmark_scores() -> dict[str, float]:
       5. Artificial Analysis Intelligence Index (covers DeepSeek V4, GLM-5,
          Kimi K2.6, MiMo V2.5, Qwen3.6 — fills the Arena/Leaderboard gap)
 
-    Returns dict mapping model_id -> normalized score (0-100). Any source
-    that fails is logged and skipped; the function never raises.
+    Returns dict mapping model_id -> normalized score (0-100). All sources
+    are fetched concurrently; any source that fails is logged and skipped,
+    and the function never raises.
     """
     from whichllm.models.benchmark_sources import (
         fetch_aa_index_scores,
         fetch_aider_polyglot_scores,
+        fetch_arena_scores,
+        fetch_leaderboard_with_fallback,
         fetch_livebench_scores,
         fetch_vision_scores,
+        get_aa_curated_fallback,
+        get_livebench_curated_fallback,
     )
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        client.headers["User-Agent"] = f"whichllm/{_current_version()}"
+        leaderboard_task = asyncio.create_task(fetch_leaderboard_with_fallback(client))
+        arena_task = asyncio.create_task(fetch_arena_scores(client))
+        livebench_task = asyncio.create_task(fetch_livebench_scores(client))
+        aa_task = asyncio.create_task(fetch_aa_index_scores(client))
+        aider_task = asyncio.create_task(fetch_aider_polyglot_scores(client))
+        vision_task = asyncio.create_task(fetch_vision_scores(client))
+
+        (
+            lb_result,
+            arena_result,
+            livebench_result,
+            aa_result,
+            aider_result,
+            vision_result,
+        ) = await asyncio.gather(
+            leaderboard_task,
+            arena_task,
+            livebench_task,
+            aa_task,
+            aider_task,
+            vision_task,
+            return_exceptions=True,
+        )
 
     # Layered merge: build a "current" dict from live sources (AA, LiveBench,
     # Aider) and a "frozen" dict from archived sources (OLLB v2, Arena). The
@@ -367,73 +190,65 @@ def fetch_benchmark_scores() -> dict[str, float]:
     frozen: dict[str, float] = {}
     current: dict[str, float] = {}
 
-    with httpx.Client(timeout=30.0) as client:
-        # Frozen tier #1: Open LLM Leaderboard v2 (archived 2025-06)
-        try:
-            try:
-                lb_scores = _fetch_leaderboard_parquet(client)
-            except ImportError:
-                lb_scores = _fetch_leaderboard_api(client)
-            frozen.update(lb_scores)
-            logger.debug(f"Leaderboard: {len(lb_scores)} scores (frozen)")
-        except Exception as e:
-            logger.warning(f"Leaderboard fetch failed: {e}")
+    # Frozen tier #1: Open LLM Leaderboard v2 (archived 2025-06)
+    if isinstance(lb_result, BaseException):
+        logger.warning(f"Leaderboard fetch failed: {lb_result}")
+    else:
+        frozen.update(lb_result)
+        logger.debug(f"Leaderboard: {len(lb_result)} scores (frozen)")
 
-        # Frozen tier #2: Chatbot Arena ELO (frozen 2025-07-17)
-        try:
-            arena_scores = _fetch_arena_scores(client)
-            for k, v in arena_scores.items():
-                if frozen.get(k, 0.0) < v:
-                    frozen[k] = v
-            logger.debug(f"Arena: {len(arena_scores)} scores (frozen)")
-        except Exception as e:
-            logger.warning(f"Arena fetch failed: {e}")
+    # Frozen tier #2: Chatbot Arena ELO (frozen 2025-07-17)
+    if isinstance(arena_result, BaseException):
+        logger.warning(f"Arena fetch failed, using fallback: {arena_result}")
+    else:
+        for k, v in arena_result.items():
+            if frozen.get(k, 0.0) < v:
+                frozen[k] = v
+        logger.debug(f"Arena: {len(arena_result)} scores (frozen)")
 
-        # Current tier: LiveBench (monthly-refreshed)
-        try:
-            lb_scores = fetch_livebench_scores(client)
-            for k, v in lb_scores.items():
-                if current.get(k, 0.0) < v:
-                    current[k] = v
-            logger.debug(f"LiveBench: {len(lb_scores)} scores (current)")
-        except Exception as e:
-            logger.debug(f"LiveBench fetch failed: {e}")
+    # Current tier: LiveBench (monthly-refreshed)
+    if isinstance(livebench_result, BaseException):
+        logger.warning(f"LiveBench fetch failed, will use fallback: {livebench_result}")
+        livebench_result = get_livebench_curated_fallback()
 
-        # Current tier: Artificial Analysis Intelligence Index (~weekly refresh)
-        try:
-            aa_scores = fetch_aa_index_scores(client)
-            for k, v in aa_scores.items():
-                if current.get(k, 0.0) < v:
-                    current[k] = v
-            logger.debug(f"AA Index: {len(aa_scores)} scores (current)")
-        except Exception as e:
-            logger.debug(f"AA Index fetch failed: {e}")
+    for k, v in livebench_result.items():
+        if current.get(k, 0.0) < v:
+            current[k] = v
+    logger.debug(f"LiveBench: {len(livebench_result)} scores (current)")
 
-        # Current tier: Aider polyglot (coding-specific). Treat as a current
-        # source but soft-merged — coding is one axis of capability, so a high
-        # Aider score is informative but shouldn't unilaterally dethrone a
-        # weaker-coding-but-strong-general AA result.
-        try:
-            aider_scores = fetch_aider_polyglot_scores(client)
-            for k, v in aider_scores.items():
-                if current.get(k, 0.0) < v * 0.85:
-                    current[k] = v * 0.85
-            logger.debug(f"Aider polyglot: {len(aider_scores)} scores (current, 0.85x)")
-        except Exception as e:
-            logger.debug(f"Aider fetch failed: {e}")
+    # Current tier: Artificial Analysis Intelligence Index (~weekly refresh)
+    if isinstance(aa_result, BaseException):
+        logger.warning(f"AA Index fetch failed, will use fallback: {aa_result}")
+        aa_result = get_aa_curated_fallback()
 
-        # Current tier: vision-language capability index. Text leaderboards
-        # don't score VLMs, so without this the only VLM with a direct hit
-        # was a two-generations-old Qwen2-VL-7B. Profile filtering ensures
-        # these scores only affect ``--profile vision`` rankings.
-        try:
-            vision_scores = fetch_vision_scores(client)
-            for k, v in vision_scores.items():
-                if current.get(k, 0.0) < v:
-                    current[k] = v
-            logger.debug(f"Vision: {len(vision_scores)} scores (current)")
-        except Exception as e:
-            logger.debug(f"Vision fetch failed: {e}")
+    for k, v in aa_result.items():
+        if current.get(k, 0.0) < v:
+            current[k] = v
+    logger.debug(f"AA Index: {len(aa_result)} scores (current)")
+
+    # Current tier: Aider polyglot (coding-specific). Treat as a current
+    # source but soft-merged — coding is one axis of capability, so a high
+    # Aider score is informative but shouldn't unilaterally dethrone a
+    # weaker-coding-but-strong-general AA result.
+    if isinstance(aider_result, BaseException):
+        logger.warning(f"Aider fetch failed: {aider_result}")
+    else:
+        for k, v in aider_result.items():
+            if current.get(k, 0.0) < v * 0.85:
+                current[k] = v * 0.85
+        logger.debug(f"Aider polyglot: {len(aider_result)} scores (current, 0.85x)")
+
+    # Current tier: vision-language capability index. Text leaderboards
+    # don't score VLMs, so without this the only VLM with a direct hit
+    # was a two-generations-old Qwen2-VL-7B. Profile filtering ensures
+    # these scores only affect ``--profile vision`` rankings.
+    if isinstance(vision_result, BaseException):
+        logger.warning(f"Vision fetch failed: {vision_result}")
+    else:
+        for k, v in vision_result.items():
+            if current.get(k, 0.0) < v:
+                current[k] = v
+        logger.debug(f"Vision: {len(vision_result)} scores (current)")
 
     # Build combined: current overrides frozen entry-by-entry, but frozen still
     # contributes for any id no current source has tracked.

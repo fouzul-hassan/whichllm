@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 import httpx
+
+from whichllm.models.benchmark_sources.constants import _NEXT_DATA_RE
+from whichllm.models.benchmark_sources.types import ExtractionFailed
+from whichllm.models.benchmark_sources.utils import _walk
 
 logger = logging.getLogger(__name__)
 
@@ -189,24 +192,6 @@ def _normalize_aa_index(index: float) -> float:
     return max(0.0, min(100.0, round(normalized, 1)))
 
 
-_NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__"[^>]*>(?P<json>.*?)</script>', re.DOTALL
-)
-
-
-def _walk(obj, depth: int = 0):
-    """Yield every dict encountered while recursively walking a JSON tree."""
-    if depth > 12:
-        return
-    if isinstance(obj, dict):
-        yield obj
-        for v in obj.values():
-            yield from _walk(v, depth + 1)
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from _walk(item, depth + 1)
-
-
 def _extract_aa_pairs(payload: dict) -> list[tuple[str, float]]:
     """Walk the Next.js payload looking for {name, intelligenceIndex}-shaped
     objects regardless of where they are nested."""
@@ -236,77 +221,50 @@ def _extract_aa_pairs(payload: dict) -> list[tuple[str, float]]:
     return pairs
 
 
-def fetch_aa_index_scores(
-    client: httpx.Client | None = None, timeout: float = 20.0
-) -> dict[str, float]:
+async def fetch_aa_index_scores(client: httpx.AsyncClient) -> dict[str, float]:
     """Fetch Artificial Analysis Intelligence Index scores.
 
     Returns ``{hf_id: normalized_score_0_100}`` for every model AA reports
     that we can map back to a HuggingFace repo via :data:`AA_NAME_TO_HF_IDS`.
 
-    On any error returns ``{}``.
+    Raises on HTTP / parse failure.
     """
     scores: dict[str, float] = {}
-    own_client = False
-    if client is None:
-        client = httpx.Client(timeout=timeout, follow_redirects=True)
-        own_client = True
-    try:
-        resp = client.get(
-            AA_LEADERBOARD_URL,
-            headers={"User-Agent": "whichllm/0.5 (+https://github.com/local)"},
-        )
-        resp.raise_for_status()
-        text = resp.text
-        match = _NEXT_DATA_RE.search(text)
-        if not match:
-            logger.debug("AA leaderboard: __NEXT_DATA__ payload not found")
-            return _curated_fallback()
-        try:
-            payload = json.loads(match.group("json"))
-        except json.JSONDecodeError as e:
-            logger.debug(f"AA leaderboard: malformed JSON payload: {e}")
-            return _curated_fallback()
-        pairs = _extract_aa_pairs(payload)
-        if not pairs:
-            logger.debug("AA leaderboard: no (name, score) pairs found, using fallback")
-            return _curated_fallback()
-        # When the same display name appears multiple times (different size
-        # tiers), keep the maximum value — it represents the most capable
-        # variant available.
-        best_by_name: dict[str, float] = {}
-        for name, score in pairs:
-            current = best_by_name.get(name)
-            if current is None or score > current:
-                best_by_name[name] = score
-        for name, score in best_by_name.items():
-            hf_ids = AA_NAME_TO_HF_IDS.get(name)
-            if not hf_ids:
-                continue
-            normalized = _normalize_aa_index(score)
-            if normalized <= 0:
-                continue
-            for hf_id in hf_ids:
-                # Use max so a higher-confidence source wins on conflict.
-                existing = scores.get(hf_id, 0.0)
-                if normalized > existing:
-                    scores[hf_id] = normalized
-        if not scores:
-            logger.debug(
-                "AA index: live fetch returned 0 mapped scores, using fallback"
-            )
-            return _curated_fallback()
-        logger.debug(f"AA index: {len(scores)} mapped scores")
-        return scores
-    except (httpx.HTTPError, ValueError) as e:
-        logger.debug(f"AA leaderboard fetch failed: {e}, using fallback")
-        return _curated_fallback()
-    finally:
-        if own_client:
-            client.close()
+    resp = await client.get(AA_LEADERBOARD_URL)
+    resp.raise_for_status()
+    match = _NEXT_DATA_RE.search(resp.text)
+    if not match:
+        raise ExtractionFailed("__NEXT_DATA__ payload not found")
+    payload = json.loads(match.group("json"))
+    pairs = _extract_aa_pairs(payload)
+    if not pairs:
+        raise ExtractionFailed("AA leaderboard: no (name, score) pairs found")
+    # When the same display name appears multiple times (different size
+    # tiers), keep the maximum value — it represents the most capable
+    # variant available.
+    best_by_name: dict[str, float] = {}
+    for name, score in pairs:
+        current = best_by_name.get(name)
+        if current is None or score > current:
+            best_by_name[name] = score
+    for name, score in best_by_name.items():
+        hf_ids = AA_NAME_TO_HF_IDS.get(name)
+        if not hf_ids:
+            continue
+        normalized = _normalize_aa_index(score)
+        if normalized <= 0:
+            continue
+        for hf_id in hf_ids:
+            existing = scores.get(hf_id, 0.0)
+            if normalized > existing:
+                scores[hf_id] = normalized
+    if not scores:
+        raise ExtractionFailed("AA index: live fetch returned 0 mapped scores")
+    logger.debug(f"AA index: {len(scores)} mapped scores")
+    return scores
 
 
-def _curated_fallback() -> dict[str, float]:
+def get_aa_curated_fallback() -> dict[str, float]:
     """Return the 2026-05-14 curated snapshot, normalized to the 0-100 scale.
 
     Used whenever the live HTML scrape cannot extract data — for example

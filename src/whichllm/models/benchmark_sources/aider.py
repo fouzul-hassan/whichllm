@@ -105,45 +105,29 @@ def _parse_yaml_lite(text: str) -> list[tuple[str, float]]:
     return out
 
 
-def fetch_aider_polyglot_scores(
-    client: httpx.Client | None = None, timeout: float = 20.0
-) -> dict[str, float]:
-    """Fetch Aider polyglot pass-rates; empty dict on any failure."""
+async def fetch_aider_polyglot_scores(client: httpx.AsyncClient) -> dict[str, float]:
+    """Fetch Aider polyglot pass-rates. Raises on HTTP / parse failure."""
     scores: dict[str, float] = {}
-    own_client = False
-    if client is None:
-        client = httpx.Client(timeout=timeout, follow_redirects=True)
-        own_client = True
-    try:
-        resp = client.get(
-            AIDER_POLYGLOT_YML_URL,
-            headers={"User-Agent": "whichllm/0.5"},
-        )
-        resp.raise_for_status()
-        pairs = _parse_yaml_lite(resp.text)
-        if not pairs:
-            logger.debug("Aider polyglot: 0 records parsed")
-            return {}
-        best_by_name: dict[str, float] = {}
-        for name, rate in pairs:
-            cur = best_by_name.get(name)
-            if cur is None or rate > cur:
-                best_by_name[name] = rate
-        for name, rate in best_by_name.items():
-            ids = AIDER_NAME_TO_HF_IDS.get(name)
-            if not ids:
-                continue
-            normalized = _normalize(rate)
-            if normalized <= 0:
-                continue
-            for hf_id in ids:
-                if scores.get(hf_id, 0.0) < normalized:
-                    scores[hf_id] = normalized
-        logger.debug(f"Aider polyglot: {len(scores)} mapped scores")
-        return scores
-    except (httpx.HTTPError, ValueError) as e:
-        logger.debug(f"Aider polyglot fetch failed: {e}")
+    resp = await client.get(AIDER_POLYGLOT_YML_URL)
+    resp.raise_for_status()
+    pairs = _parse_yaml_lite(resp.text)
+    if not pairs:
+        logger.debug("Aider polyglot: 0 records parsed")
         return {}
-    finally:
-        if own_client:
-            client.close()
+    best_by_name: dict[str, float] = {}
+    for name, rate in pairs:
+        cur = best_by_name.get(name)
+        if cur is None or rate > cur:
+            best_by_name[name] = rate
+    for name, rate in best_by_name.items():
+        ids = AIDER_NAME_TO_HF_IDS.get(name)
+        if not ids:
+            continue
+        normalized = _normalize(rate)
+        if normalized <= 0:
+            continue
+        for hf_id in ids:
+            if scores.get(hf_id, 0.0) < normalized:
+                scores[hf_id] = normalized
+    logger.debug(f"Aider polyglot: {len(scores)} mapped scores")
+    return scores

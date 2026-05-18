@@ -72,14 +72,12 @@ VISION_FALLBACK_2026_05: dict[str, float] = {
 }
 
 
-def fetch_vision_scores(
-    client: httpx.Client | None = None, timeout: float = 20.0
-) -> dict[str, float]:
+async def fetch_vision_scores(client: httpx.AsyncClient) -> dict[str, float]:
     """Return curated VLM capability scores.
 
     No stable live source exists, so this returns the frozen snapshot.
-    The ``client``/``timeout`` parameters mirror the other source
-    functions so the caller can treat all sources uniformly and a live
-    scrape can be slotted in later without changing call sites.
+    The ``client`` parameter mirrors the other source functions so the
+    caller can treat all sources uniformly and a live scrape can be
+    slotted in later without changing call sites.
     """
     return dict(VISION_FALLBACK_2026_05)

@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 import httpx
+
+from whichllm.models.benchmark_sources.constants import _NEXT_DATA_RE
+from whichllm.models.benchmark_sources.types import ExtractionFailed
+from whichllm.models.benchmark_sources.utils import _walk
 
 logger = logging.getLogger(__name__)
 
@@ -110,23 +113,6 @@ LIVEBENCH_NAME_TO_HF_IDS: dict[str, list[str]] = {
 }
 
 
-_NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__"[^>]*>(?P<json>.*?)</script>', re.DOTALL
-)
-
-
-def _walk(obj, depth: int = 0):
-    if depth > 12:
-        return
-    if isinstance(obj, dict):
-        yield obj
-        for v in obj.values():
-            yield from _walk(v, depth + 1)
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from _walk(item, depth + 1)
-
-
 def _extract_lb_pairs(payload: dict) -> list[tuple[str, float]]:
     pairs: list[tuple[str, float]] = []
     for node in _walk(payload):
@@ -168,65 +154,40 @@ def _normalize_livebench(score: float) -> float:
     return max(0.0, min(100.0, round(normalized, 1)))
 
 
-def fetch_livebench_scores(
-    client: httpx.Client | None = None, timeout: float = 20.0
-) -> dict[str, float]:
-    """Fetch LiveBench scores; empty dict on any failure."""
+async def fetch_livebench_scores(client: httpx.AsyncClient) -> dict[str, float]:
+    """Fetch LiveBench scores. Raises on HTTP / parse failure."""
     scores: dict[str, float] = {}
-    own_client = False
-    if client is None:
-        client = httpx.Client(timeout=timeout, follow_redirects=True)
-        own_client = True
-    try:
-        resp = client.get(
-            LIVEBENCH_URL,
-            headers={"User-Agent": "whichllm/0.5"},
-        )
-        resp.raise_for_status()
-        match = _NEXT_DATA_RE.search(resp.text)
-        if not match:
-            logger.debug("LiveBench: __NEXT_DATA__ payload not found, using fallback")
-            return _curated_fallback()
-        try:
-            payload = json.loads(match.group("json"))
-        except json.JSONDecodeError as e:
-            logger.debug(f"LiveBench: malformed payload: {e}, using fallback")
-            return _curated_fallback()
-        pairs = _extract_lb_pairs(payload)
-        if not pairs:
-            logger.debug("LiveBench: no (name, score) pairs extracted, using fallback")
-            return _curated_fallback()
-        best_by_name: dict[str, float] = {}
-        for name, score in pairs:
-            cur = best_by_name.get(name)
-            if cur is None or score > cur:
-                best_by_name[name] = score
-        for name, score in best_by_name.items():
-            ids = LIVEBENCH_NAME_TO_HF_IDS.get(name)
-            if not ids:
-                continue
-            normalized = _normalize_livebench(score)
-            if normalized <= 0:
-                continue
-            for hf_id in ids:
-                if scores.get(hf_id, 0.0) < normalized:
-                    scores[hf_id] = normalized
-        if not scores:
-            logger.debug(
-                "LiveBench: live fetch returned 0 mapped scores, using fallback"
-            )
-            return _curated_fallback()
-        logger.debug(f"LiveBench: {len(scores)} mapped scores")
-        return scores
-    except (httpx.HTTPError, ValueError) as e:
-        logger.debug(f"LiveBench fetch failed: {e}, using fallback")
-        return _curated_fallback()
-    finally:
-        if own_client:
-            client.close()
+    resp = await client.get(LIVEBENCH_URL)
+    resp.raise_for_status()
+    match = _NEXT_DATA_RE.search(resp.text)
+    if not match:
+        raise ExtractionFailed("__NEXT_DATA__ payload not found")
+    payload = json.loads(match.group("json"))
+    pairs = _extract_lb_pairs(payload)
+    if not pairs:
+        raise ExtractionFailed("no (name, score) pairs extracted, using fallback")
+    best_by_name: dict[str, float] = {}
+    for name, score in pairs:
+        cur = best_by_name.get(name)
+        if cur is None or score > cur:
+            best_by_name[name] = score
+    for name, score in best_by_name.items():
+        ids = LIVEBENCH_NAME_TO_HF_IDS.get(name)
+        if not ids:
+            continue
+        normalized = _normalize_livebench(score)
+        if normalized <= 0:
+            continue
+        for hf_id in ids:
+            if scores.get(hf_id, 0.0) < normalized:
+                scores[hf_id] = normalized
+    if not scores:
+        raise ExtractionFailed("live fetch returned 0 mapped scores")
+    logger.debug(f"LiveBench: {len(scores)} mapped scores")
+    return scores
 
 
-def _curated_fallback() -> dict[str, float]:
+def get_livebench_curated_fallback() -> dict[str, float]:
     """Return the 2026-04 curated snapshot, normalized to the 0-100 scale.
 
     Used when the live HTML scrape cannot extract data. This is the same

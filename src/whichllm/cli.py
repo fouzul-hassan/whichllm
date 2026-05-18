@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
 import typer
@@ -12,6 +11,7 @@ from rich.console import Console
 
 from whichllm.hardware.types import HardwareInfo
 from whichllm.models.types import GGUFVariant, ModelInfo
+from whichllm.utils import _current_version
 
 app = typer.Typer(
     name="llm-checker",
@@ -25,14 +25,6 @@ console = Console()
 def _run_async(coro):
     """Run async coroutine from sync context."""
     return asyncio.run(coro)
-
-
-def _current_version() -> str:
-    """Return installed package version."""
-    try:
-        return version("whichllm")
-    except PackageNotFoundError:
-        return "unknown"
 
 
 def _print_version(value: bool) -> None:
@@ -306,7 +298,7 @@ def main(
         if bench_scores is None:
             try:
                 progress.update(task, description="Fetching benchmark scores...")
-                bench_scores = fetch_benchmark_scores()
+                bench_scores = _run_async(fetch_benchmark_scores())
                 save_benchmark_cache(bench_scores)
             except Exception as e:
                 console.print(f"[yellow]Warning:[/] Benchmark data unavailable: {e}")
@@ -510,7 +502,7 @@ def upgrade(
         bench_scores = None if refresh else load_benchmark_cache()
         if bench_scores is None:
             try:
-                bench_scores = fetch_benchmark_scores()
+                bench_scores = _run_async(fetch_benchmark_scores())
                 save_benchmark_cache(bench_scores)
             except Exception:
                 bench_scores = {}

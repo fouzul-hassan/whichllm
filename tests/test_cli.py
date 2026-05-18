@@ -6,7 +6,6 @@ from click.exceptions import Exit
 import whichllm.cli as cli_mod
 from whichllm.cli import (
     _auto_min_params_for_profile,
-    _current_version,
     _fill_missing_published_at,
     _generate_chat_script,
     _include_vision_candidates,
@@ -18,6 +17,7 @@ from whichllm.cli import (
     _validate_evidence,
     app,
 )
+from whichllm.utils import _current_version
 from whichllm.engine.types import CompatibilityResult
 from whichllm.hardware.types import GPUInfo, HardwareInfo
 from whichllm.models.types import GGUFVariant, ModelInfo
