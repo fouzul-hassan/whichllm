@@ -17,16 +17,16 @@ def _current_version() -> str:
 
 
 _SHORTHAND_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmb])$", re.IGNORECASE)
-_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+_MULTIPLIERS = {"k": 1024, "m": 1024 * 1024, "b": 1024 * 1024 * 1024}
 
 
 def parse_context_length(value: str) -> int:
     """Parse a context length string, supporting shorthand like 64k or 128K.
 
     Accepts plain integers (e.g. "4096") or shorthand with a suffix:
-      k/K = x1,000  (64k -> 64000)
-      m/M = x1,000,000
-      b/B = x1,000,000,000
+      k/K = x1,024  (64k -> 65536)
+      m/M = x1,048,576
+      b/B = x1,073,741,824
 
     Returns the integer context length. Raises ValueError on bad input.
     """

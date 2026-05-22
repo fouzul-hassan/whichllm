@@ -40,22 +40,22 @@ def test_parse_plain_integer():
 
 
 def test_parse_k_suffix():
-    assert parse_context_length("64k") == 64_000
-    assert parse_context_length("128K") == 128_000
+    assert parse_context_length("64k") == 64 * 1024
+    assert parse_context_length("128K") == 128 * 1024
 
 
 def test_parse_m_suffix():
-    assert parse_context_length("1m") == 1_000_000
-    assert parse_context_length("2M") == 2_000_000
+    assert parse_context_length("1m") == 1024 * 1024
+    assert parse_context_length("2M") == 2 * 1024 * 1024
 
 
 def test_parse_fractional_suffix():
-    assert parse_context_length("1.5k") == 1_500
-    assert parse_context_length("0.5m") == 500_000
+    assert parse_context_length("1.5k") == int(1.5 * 1024)
+    assert parse_context_length("0.5m") == int(0.5 * 1024 * 1024)
 
 
 def test_parse_whitespace_is_stripped():
-    assert parse_context_length("  64k  ") == 64_000
+    assert parse_context_length("  64k  ") == 64 * 1024
 
 
 def test_parse_rejects_invalid_string():
@@ -78,4 +78,4 @@ def test_click_type_passes_int_through():
 
 
 def test_click_type_parses_shorthand():
-    assert CONTEXT_LENGTH.convert("64k", None, None) == 64_000
+    assert CONTEXT_LENGTH.convert("64k", None, None) == 64 * 1024
