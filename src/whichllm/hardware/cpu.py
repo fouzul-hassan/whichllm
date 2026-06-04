@@ -74,8 +74,7 @@ def _cpu_name_from_wmic() -> str | None:
 
 def _cpu_name_from_windows_cim() -> str | None:
     script = (
-        "Get-CimInstance Win32_Processor | "
-        "Select-Object -First 1 -ExpandProperty Name"
+        "Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name"
     )
     for executable in ("powershell", "pwsh"):
         try:
