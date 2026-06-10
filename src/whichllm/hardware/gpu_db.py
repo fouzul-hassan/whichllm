@@ -60,6 +60,9 @@ def _normalize_detected_name(name: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
+_SORTED_BW_KEYS = sorted(GPU_BANDWIDTH, key=len, reverse=True)
+
+
 def _substring_bandwidth(name: str) -> float | None:
     """Curated ``GPU_BANDWIDTH`` lookup (longest key first), mobile-aware.
 
@@ -70,7 +73,7 @@ def _substring_bandwidth(name: str) -> float | None:
         return None
     name_upper = name.upper()
     name_is_mobile = bool(_MOBILE_MARKER_RE.search(name))
-    for key in sorted(GPU_BANDWIDTH, key=len, reverse=True):
+    for key in _SORTED_BW_KEYS:
         if key.upper() in name_upper:
             if name_is_mobile and not _MOBILE_MARKER_RE.search(key):
                 continue
@@ -154,13 +157,19 @@ def _dbgpu_bandwidth(name: str, vram_bytes: int | None) -> float | None:
             if same_vram:
                 candidates = same_vram
 
-    canonical = min(candidates, key=len)
-    try:
-        spec = db[canonical]
-    except KeyError:  # pragma: no cover - canonical comes from the index
-        return None
-    bandwidth = getattr(spec, "memory_bandwidth_gb_s", None)
-    return float(bandwidth) if bandwidth else None
+    # If several VRAM bins remain (VRAM unknown or no bin matched it), take the
+    # lowest bandwidth among them: an ambiguous match must never over-promise
+    # speed. Bins of the same card usually share one value anyway.
+    bandwidths: list[float] = []
+    for canonical in candidates:
+        try:
+            spec = db[canonical]
+        except KeyError:  # pragma: no cover - canonical comes from the index
+            continue
+        bandwidth = getattr(spec, "memory_bandwidth_gb_s", None)
+        if bandwidth:
+            bandwidths.append(float(bandwidth))
+    return min(bandwidths) if bandwidths else None
 
 
 def resolve_detected_bandwidth(
