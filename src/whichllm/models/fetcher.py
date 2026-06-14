@@ -335,6 +335,20 @@ _KNOWN_PARAM_COUNTS: dict[str, int] = {
     "MiniMaxAI/MiniMax-M2": 230_000_000_000,
     "MiniMaxAI/MiniMax-M2.5": 230_000_000_000,
     "stepfun-ai/Step-3.5-Flash": 30_000_000_000,
+    # T5 family (encoder-decoder). mT5 / ByT5 publish only legacy
+    # pytorch_model.bin checkpoints, so HF exposes no safetensors.total and
+    # their T5 config lacks hidden_size — both param-extraction paths miss.
+    # Sizes are from the model cards.
+    "google/mt5-small": 300_000_000,
+    "google/mt5-base": 580_000_000,
+    "google/mt5-large": 1_200_000_000,
+    "google/mt5-xl": 3_700_000_000,
+    "google/mt5-xxl": 13_000_000_000,
+    "google/byt5-small": 300_000_000,
+    "google/byt5-base": 582_000_000,
+    "google/byt5-large": 1_230_000_000,
+    "google/byt5-xl": 3_740_000_000,
+    "google/byt5-xxl": 12_900_000_000,
 }
 
 # Curated counts that should win even when the HF API exposes safetensors
@@ -418,23 +432,41 @@ def _extract_architecture(config: dict) -> str:
     arch_list = config.get("architectures", [])
     if arch_list:
         arch = arch_list[0].lower()
-        # Normalize
+        # Normalize. "t5gemma" must precede "gemma" and "t5" so the
+        # encoder-decoder T5Gemma is not mislabeled as a Gemma decoder.
         for name in [
             "llama",
             "qwen2",
             "mistral",
             "mixtral",
+            "t5gemma",
             "gemma",
             "phi",
             "starcoder",
             "command",
             "deepseek",
+            "t5",
         ]:
             if name in arch:
                 return name
         return arch.replace("forcausallm", "").replace("forconditionalgeneration", "")
     model_type = config.get("model_type", "")
     return model_type.lower()
+
+
+def _is_t5_family(data: dict) -> bool:
+    """True if a ``text2text-generation`` model is T5-lineage.
+
+    The seq2seq listing also returns BART / Pegasus / M2M100 / Marian, which
+    whichllm does not score. Restrict it to the T5 family (T5, Flan-T5, mT5,
+    ByT5, LongT5, UL2, T5Gemma) — the lineage the ``t5`` map knows about.
+    """
+    config = data.get("config") or {}
+    model_type = str(config.get("model_type", "")).lower()
+    if "t5" in model_type or "ul2" in model_type:
+        return True
+    name = str(data.get("id", "")).lower().rsplit("/", 1)[-1]
+    return any(marker in name for marker in ("t5", "-ul2", "ul2-", "flan"))
 
 
 def _parse_model(data: dict) -> ModelInfo | None:
@@ -778,6 +810,20 @@ async def fetch_models(
             # Nemotron 3 series
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            # T5 family (encoder-decoder). The larger sizes have low download
+            # counts and never surface via the sort-based seq2seq query, so
+            # pull the canonical ones by ID.
+            "google-t5/t5-3b",
+            "google-t5/t5-11b",
+            "google/flan-t5-xl",
+            "google/flan-t5-xxl",
+            "google/mt5-xl",
+            "google/mt5-xxl",
+            # T5Gemma (2025) — newest T5 generation, low downloads.
+            "google/t5gemma-2b-2b-prefixlm-it",
+            "google/t5gemma-9b-9b-prefixlm-it",
+            "google/t5gemma-2b-2b-ul2-it",
+            "google/t5gemma-9b-9b-ul2-it",
         )
         for model_id in _FRONTIER_MODEL_IDS:
             if model_id in seen_ids:
@@ -814,6 +860,44 @@ async def fetch_models(
             if model:
                 models.append(model)
                 seen_ids.add(model.id)
+
+        # T5 / seq2seq family. These are tagged `text2text-generation`, not
+        # `text-generation`, so none of the queries above can see them. Pull
+        # the popular ones by download / trending rank and keep only the
+        # T5 lineage — whichllm scores them via the `t5` lineage map.
+        for sort_key in ("downloads", "trending"):
+            t5_params = {
+                "filter": "text2text-generation",
+                "sort": sort_key,
+                "limit": str(limit),
+                "expand[]": [
+                    "config",
+                    "safetensors",
+                    "gguf",
+                    "cardData",
+                    "siblings",
+                    "evalResults",
+                ],
+            }
+            logger.debug(f"Fetching T5/seq2seq models from HF API (sort={sort_key})")
+            try:
+                resp = await get_with_retries(
+                    client, f"{HF_API_BASE}/models", params=t5_params
+                )
+                resp.raise_for_status()
+                t5_data_list = resp.json()
+            except (httpx.HTTPError, ValueError) as e:
+                logger.debug(f"T5/seq2seq fetch skipped (sort={sort_key}): {e}")
+                continue
+            for data in t5_data_list:
+                if data.get("id") in seen_ids:
+                    continue
+                if not _is_t5_family(data):
+                    continue
+                model = _parse_model(data)
+                if model:
+                    models.append(model)
+                    seen_ids.add(model.id)
 
         if include_vision:
             # 画像入力系は用途が異なるため、明示的に有効化されたときだけ取得する。

@@ -228,6 +228,26 @@ def test_p2_lineage_covers_llama_deepseek_gemma_phi():
     )
 
 
+def test_p2_lineage_covers_t5_family():
+    # Newest generation (T5Gemma, 2025) must beat Flan-T5, which beats the
+    # original T5 — and the encoder-decoder family must not collide with the
+    # Gemma decoder lineage.
+    t5gemma = _generation_bonus("google/t5gemma-2b-2b-prefixlm-it")
+    flan = _generation_bonus("google/flan-t5-xxl")
+    original = _generation_bonus("t5-11b")
+    assert t5gemma > flan > original
+    # The "t5gemma" id contains "gemma" but must not be read as Gemma-2.
+    assert _generation_bonus("google/t5gemma-2b-2b-it") > _generation_bonus(
+        "google/gemma-2-27b-it"
+    )
+
+
+def test_p2_t5_lineage_ignores_lookalikes():
+    # "t5" is a short substring; these must not be mistaken for T5 models.
+    assert _generation_bonus("openai/gpt5") == 0.0
+    assert _generation_bonus("ragul2607/Oprel-2b") == 0.0
+
+
 def test_p2_unknown_family_gets_zero_bonus():
     assert _generation_bonus("random-org/random-model-7b") == 0.0
 

@@ -3,6 +3,7 @@
 from whichllm.models.fetcher import (
     _extract_hf_eval_score,
     _extract_published_at,
+    _is_t5_family,
     _normalize_param_count,
     _parse_model,
     dicts_to_models,
@@ -240,6 +241,81 @@ def test_parse_model_recovers_qwen36_a3b_active_params_from_name():
     assert parsed.parameter_count == 35_951_822_704
     assert parsed.parameter_count_active == 3_000_000_000
     assert parsed.is_moe is True
+
+
+# ----------------------------------------------------------------- T5 family
+
+
+def test_parse_model_resolves_t5_via_safetensors():
+    """Flan-T5-XXL exposes safetensors.total; params come straight from it."""
+    parsed = _parse_model(
+        {
+            "id": "google/flan-t5-xxl",
+            "config": {
+                "architectures": ["T5ForConditionalGeneration"],
+                "model_type": "t5",
+            },
+            "safetensors": {"total": 11_266_928_640},
+            "siblings": [],
+            "cardData": {"license": "apache-2.0"},
+        }
+    )
+    assert parsed is not None
+    assert parsed.parameter_count == 11_266_928_640
+    assert parsed.architecture == "t5"
+
+
+def test_parse_model_resolves_mt5_from_curated_count():
+    """mT5/ByT5 ship no safetensors index and T5 config lacks hidden_size, so
+    the curated _KNOWN_PARAM_COUNTS fallback must keep them rankable."""
+    parsed = _parse_model(
+        {
+            "id": "google/mt5-base",
+            "config": {
+                "architectures": ["MT5ForConditionalGeneration"],
+                "model_type": "mt5",
+            },
+            "siblings": [],
+            "cardData": {},
+        }
+    )
+    assert parsed is not None
+    assert parsed.parameter_count == 580_000_000
+
+
+def test_parse_model_labels_t5gemma_not_gemma():
+    """T5Gemma is an encoder-decoder; its arch label must not collapse to the
+    Gemma decoder (which would also misroute lineage/recency)."""
+    parsed = _parse_model(
+        {
+            "id": "google/t5gemma-2b-2b-prefixlm-it",
+            "config": {
+                "architectures": ["T5GemmaForConditionalGeneration"],
+                "model_type": "t5gemma",
+            },
+            "safetensors": {"total": 5_600_000_000},
+            "siblings": [],
+            "cardData": {},
+        }
+    )
+    assert parsed is not None
+    assert parsed.architecture == "t5gemma"
+
+
+def test_is_t5_family_keeps_t5_drops_other_seq2seq():
+    def d(model_id, model_type):
+        return {"id": model_id, "config": {"model_type": model_type}}
+
+    # kept — T5 lineage
+    assert _is_t5_family(d("google-t5/t5-base", "t5"))
+    assert _is_t5_family(d("google/flan-t5-xxl", "t5"))
+    assert _is_t5_family(d("google/mt5-base", "mt5"))
+    assert _is_t5_family(d("google/byt5-small", "byt5"))
+    assert _is_t5_family(d("google/t5gemma-2b-2b-it", "t5gemma"))
+    # dropped — other seq2seq architectures the t5 lineage map doesn't score
+    assert not _is_t5_family(d("facebook/bart-large-cnn", "bart"))
+    assert not _is_t5_family(d("facebook/m2m100_1.2B", "m2m_100"))
+    assert not _is_t5_family(d("google/pegasus-xsum", "pegasus"))
 
 
 def test_models_cache_roundtrip_keeps_published_at():

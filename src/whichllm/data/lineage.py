@@ -140,7 +140,7 @@ MODEL_LINEAGE_VERSIONS: dict[str, list[tuple[str, int]]] = {
         (r"flan-?t5", 4),  # Flan-T5 instruction-tuned (2022)
         (r"flan-?ul2", 4),  # Flan-UL2 (2023)
         (r"codet5p", 3),  # CodeT5+ (2023); before codet5 since it's a superset
-        (r"ul2", 3),  # UL2 (2022)
+        (r"(?<![a-z0-9])ul2(?![a-z0-9])", 3),  # UL2 (2022); guarded ("ragul2607")
         (r"code-?t5", 2),  # CodeT5 (2021)
         (r"long-?t5", 2),  # LongT5 (2021)
         (r"byt5", 2),  # ByT5 byte-level (2021)
