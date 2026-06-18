@@ -48,12 +48,12 @@ MODEL_LINEAGE_VERSIONS: dict[str, list[tuple[str, int]]] = {
         (r"deepseek-coder(?!-v2)", 1),
     ],
     "gemma": [
-        # (?<!t5) so the "gemma" inside a T5Gemma id is not misread as a
-        # Gemma generation (T5Gemma is handled by the "t5" family instead).
-        (r"(?<!t5)gemma-?4", 4),
-        (r"(?<!t5)gemma-?3", 3),
-        (r"(?<!t5)gemma-?2", 2),
-        (r"(?<!t5)gemma(?!-?[2-9])", 1),
+        # Avoid reading the "gemma" segment inside T5Gemma ids as a Gemma
+        # generation. T5Gemma is handled by the "t5" family instead.
+        (r"(?<!t5)(?<!t5[-_])gemma-?4", 4),
+        (r"(?<!t5)(?<!t5[-_])gemma-?3", 3),
+        (r"(?<!t5)(?<!t5[-_])gemma-?2", 2),
+        (r"(?<!t5)(?<!t5[-_])gemma(?!-?[2-9])", 1),
     ],
     "phi": [
         (r"phi-?5", 5),
@@ -136,7 +136,7 @@ MODEL_LINEAGE_VERSIONS: dict[str, list[tuple[str, int]]] = {
         # Encoder-decoder T5 family, ordered newest -> oldest. The bare "t5"
         # fallback is boundary-guarded because "t5" is a collision-prone
         # substring (e.g. "gpt5"); every named variant is matched before it.
-        (r"t5-?gemma", 5),  # T5Gemma (2025) — Gemma-adapted encoder-decoder
+        (r"t5[-_]?gemma", 5),  # T5Gemma (2025) — Gemma-adapted encoder-decoder
         (r"flan-?t5", 4),  # Flan-T5 instruction-tuned (2022)
         (r"flan-?ul2", 4),  # Flan-UL2 (2023)
         (r"codet5p", 3),  # CodeT5+ (2023); before codet5 since it's a superset
